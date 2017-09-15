@@ -137,6 +137,7 @@ def _fuse_two_kernels(knla, knlb):
     # {{{ fuse domains
 
     new_domains = knla.domains[:]
+    slab_info = []
 
     for dom_b in knlb.domains:
         i_fuse = _find_fusable_loop_domain_index(dom_b, new_domains)
@@ -161,6 +162,13 @@ def _fuse_two_kernels(knla, knlb):
             new_domain = dom_a & dom_b
 
             new_domains[i_fuse] = new_domain
+
+            if dom_a - dom_b:
+                slab = dom_a - dom_b
+                slab_info.append(('a', slab.get_basic_sets()[0], knla))
+            if dom_b - dom_a:
+                slab = dom_b - dom_a
+                slab_info.append(('b', slab.get_basic_sets()[0], knlb))
 
     # }}}
 
@@ -214,6 +222,26 @@ def _fuse_two_kernels(knla, knlb):
             fuse_instruction_streams_with_unique_ids(
                     knla.instructions, knlb.instructions)
 
+
+    idg = {'a': knla.get_instruction_id_generator(),
+           'b': knlb.get_instruction_id_generator()}
+
+    slab_instructions = []
+    slab_domains = []
+    for slab_name, slab, knl in slab_info:
+        prefix = 'kernel_'+slab_name+'_'
+        insns = []
+        inames = set(slab.get_var_dict())
+        for insn in knl.instructions:
+            if insn.within_inames & inames:
+                insns.append(insn.copy(id=idg[slab_name](prefix+insn.id)))
+        tmp_knl = knl.copy(domains=[slab], instructions=insns)
+        from loopy.transform.iname import rename_iname
+        for iname in inames:
+            tmp_knl = rename_iname(tmp_knl, iname, prefix+iname)
+        slab_domains += tmp_knl.domains
+        slab_instructions += tmp_knl.instructions
+
     # {{{ fuse assumptions
 
     assump_a = knla.assumptions
@@ -237,8 +265,8 @@ def _fuse_two_kernels(knla, knlb):
 
     from loopy.kernel import LoopKernel
     return LoopKernel(
-            domains=new_domains,
-            instructions=new_instructions,
+            domains=new_domains + slab_domains,
+            instructions=new_instructions + slab_domains,
             args=new_args,
             name="%s_and_%s" % (knla.name, knlb.name),
             preambles=_ordered_merge_lists(knla.preambles, knlb.preambles),
@@ -282,7 +310,7 @@ def _fuse_two_kernels(knla, knlb):
                 "target",
                 knla.target,
                 knlb.target),
-            options=knla.options), old_b_id_to_new_b_id
+            options=knla.options), old_b_id_to_new_b_id, [insn.id for insn in slab_instructions]
 
 # }}}
 
@@ -377,13 +405,14 @@ def fuse_kernels(kernels, suffixes=None, data_flow=None):
             kernel_insn_ids.append([
                 insn.id for insn in knlb.instructions])
         else:
-            result, old_b_id_to_new_b_id = _fuse_two_kernels(
+            result, old_b_id_to_new_b_id, slab_ids = _fuse_two_kernels(
                     knla=result,
                     knlb=knlb)
 
             kernel_insn_ids.append([
                 old_b_id_to_new_b_id[insn.id]
                 for insn in knlb.instructions])
+            kernel_insn_ids.append(slab_ids)
 
     # {{{ realize data_flow dependencies
 
